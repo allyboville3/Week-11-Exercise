@@ -4,27 +4,218 @@ author: "Alexandra Boville"
 date: "2024-04-01"
 output: html_document
 ---
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+Libraries Used
+```{r}
+library(car)
+library(jtools)
+library(tidyverse)
+library(broom)
+library(infer)
 ```
 
-## R Markdown
+Loading in AVONET dataset
+```{r}
+f <- "https://raw.githubusercontent.com/difiore/ada-2024-datasets/main/AVONETdataset1.csv"
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+d <- read_csv(f, col_names =  TRUE)
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+d <- d %>% 
+    select(c("Species1", "Family1", "Order1", "Beak.Length_Culmen", "Beak.Width", "Beak.Depth", "Tarsus.Length", "Wing.Length", "Tail.Length", "Mass", "Habitat", "Migration", "Trophic.Level", "Trophic.Niche", "Primary.Lifestyle", "Min.Latitude", "Max.Latitude", "Centroid.Latitude", "Range.Size"))
 
-```{r cars}
-summary(cars)
+head(d)
+
+summary(d)
+#Species1, Family1, Order1, Habitat, Migration, Trophic.Level, Trophic.Niche, and Primary.Lifestyle are all categorical. Migration is scored as numeric and should be reclassified for analaysis
+```
+# Challenge 1 One-Factor ANOVA and Inference 
+
+# Step 1: Making Boxplots of log(Mass) in relation to Trophic.Level and Migration
+```{r}
+#Organizing data for Boxplots
+d <- d %>% 
+  drop_na(Mass, Trophic.Level, Migration) %>% #removing rows with NA values in these columns
+   mutate(Migration = as.factor(Migration)) #converting Migration variable from class chr to a factor
+
+#Boxplot for log(Mass) in relation to Trophic.Level
+ggplot(data = d %>% 
+         drop_na(Trophic.Level), aes(x = Trophic.Level, y = log(Mass))) +
+  geom_boxplot() + geom_jitter()
+
+#Boxplot for log(Mass) in relation to Migration
+ggplot(data = d %>% 
+         drop_na(Migration), aes(x = Migration, y = log(Mass))) +
+  geom_boxplot() + geom_jitter()
 ```
 
-## Including Plots
+# Step 2: Running Linear Models Analysis of Coefficients
 
-You can also embed plots, for example:
+```{r}
+m <- lm(log(Mass) ~ Trophic.Level, data = d)
+summary(m)
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+m1 <- lm(log(Mass) ~ Migration, data = d)
+summary(m1)
+
+
+```
+For both linear models the p-value associated with the F statistic is less than 0.05 so log(Mass) is associated with Trophic.Level and Migration. The value of the F statistic is larger for the linear model looking at the relationship between log(Mass) and Migration and in general a larger F statistic value indicates there is more between group variance. To determine if this is significant when comparing both Trophic.Level and Migration you should run additional post-hoc analyses such as an ANOVA. 
+
+Migration 1 is the reference level in this linear model and both Migration2 and Migration 3 are different from the reference level. 
+
+```{r}
+d_ref_relevel <- d %>%  
+  mutate(Migration = relevel(Migration, ref = "2")) #switching ref = between 2 and 3 and running corresponding lm() below to see how this alters coefficients
+
+m1_relevel <- lm(log(Mass) ~ Migration, data = d_ref_relevel)
+summary(m1_relevel)
+
+```
+Changing the reference level to Migration2 from Migration1 results in the negative estimate for Migration1 suggesting that Migration is negatively correlated with log(Mass). Changing the reference level from Migration1 to Migration3 results in estimates for both remaining coefficients as negative values.
+
+
+# Step 3: Conduct a post-hoc Tukey Honest Significant Differences test to also evaluate which Migration categories differ “significantly” from one another
+```{r}
+m1aov <- aov(log(Mass) ~ Migration, data = d)
+summary(m1aov)
+
+(posthoc <- TukeyHSD(m1aov, which = "Migration", conf.level = 0.95)) #produces adjusted p value for each posthoc comparison
+
+#Migration2 and Migration1 differ most significantly from one another
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+# Permutation approach to inference to generate a null distribution of F statistic values for the model of log(Mass) in relation to Trophic.Level
+```{r}
+original.F <- aov(log(Mass) ~ Trophic.Level, data = d) %>% 
+  tidy() %>% 
+  filter(term == "Trophic.Level")
+original.F #results for F stat and p value for omnibus F test
+
+
+d <- d %>% 
+  mutate(logMass = log(Mass))
+
+permuted.F <- d %>% 
+  specify(logMass ~ Trophic.Level) %>% 
+  hypothesize(null = "independence") %>% 
+  generate(reps = 1000, type = "permute") %>% 
+  calculate(stat = "F")
+
+str(permuted.F)
+ 
+visualize(permuted.F) +
+  shade_p_value(obs_stat = original.F$statistic, direction = "greater") #value of f statistic way way far to right
+#p value ver y very tiny
+
+permuted.F
+```
+
+# Challenge 2: Data Wrangling, One- and Two-Factor ANOVA
+
+# Step 1: Creating Variables relative beak length and relative tarsus length
+
+```{r}
+d$relBL <- resid(lm(formula = log(Beak.Length_Culmen) ~ log(Mass), data = d))
+d$relTL <- resid(lm(formula = log(Tarsus.Length) ~ log(Mass), data = d))
+```
+
+# Step 2: Boxplot of relative tarsus length in relation to Primary.Lifestyle and relative beak length in relation to Trophic.Niche
+
+```{r}
+ggplot(data = d %>% 
+         filter(!is.na(Primary.Lifestyle)),
+       aes(x = Primary.Lifestyle, y = relTL)) +
+  geom_boxplot() 
+
+ggplot(data = d %>% 
+         filter(!is.na(Trophic.Niche)),
+       aes(x = Trophic.Niche, y = relBL)) +
+  geom_boxplot() 
+```
+
+# Step 3: ANOVA analysis to look at association between Range.Size and Migration
+```{r}
+#already dropped NA values for migration and converted to as.factor
+m1aov <- aov(Range.Size ~ Migration, data = d)
+summary(m1aov)
+
+TukeyHSD(m1aov)
+
+
+d_ref_relevel <- d %>%  
+  mutate(Migration = relevel(Migration, ref = "3")) #switching ref = between 2 and 3 and running corresponding lm() below to see how this alters coefficients
+
+m1_relevel <- lm(Range.Size ~ Migration, data = d_ref_relevel)
+summary(m1_relevel)
+
+
+TukeyHSD(m1aov)
+
+```
+Range size is significantly dependent on Migration. All migration factors are different from the reference level. The reference level is Migration1 (sedentary lifestyle) but all Migration levels are significant.  
+
+# Step 4: Looking at Only Passeriformes Data
+
+```{r}
+#Reducing Data to only include members of Order Passeriformed
+passeriformes <- d %>% 
+  filter(Order1 == "Passeriformes")
+
+head(passeriformes)
+```
+
+```{r}
+#Running one-factor ANOVA
+aov1 <- aov(relBL ~ Trophic.Level, data = passeriformes)
+aov2 <- aov(relBL ~ Primary.Lifestyle, data = passeriformes)
+summary(aov1)
+summary(aov2)
+
+#boxplots of response variable by each predictor and by the combination of predictors
+ggplot(passeriformes %>% 
+         filter(!is.na(Trophic.Level)), aes(x = Trophic.Level, y =relBL)) + 
+        geom_boxplot()
+
+ggplot(passeriformes %>% 
+         filter(!is.na(Trophic.Level)), aes(x = Primary.Lifestyle, y =relBL)) + 
+        geom_boxplot()
+```
+Both Trophic.Level and Primary.Lifestyle are good predictors of relatuve beak length. Both have siginficant P values and high F-values. 
+
+# Step 5: Running Two-factor ANOVA
+
+```{r}
+
+m_passeriformes <- aov(relBL ~ Trophic.Level + Primary.Lifestyle, data = passeriformes) #looking at relative association between Tropic.Level and Primary.Lifestyle
+summary(m_passeriformes)
+
+```
+Tropic.Level has a larger effect on relative beak length since it has a larger F value. 
+
+#Step 6: Two-factor ANOVA with interaction of predictor variables
+```{r}
+m_t_and_p_interact <- aov(relBL ~ Trophic.Level + Primary.Lifestyle + Trophic.Level:Primary.Lifestyle, data = passeriformes) # : indicated interaction
+summary(m_t_and_p_interact)
+```
+The interaction between Trophic.Level and Primary.Lifestyle do not predict relative beak length more than each predictor variable does independently. 
+
+
+```{r}
+interaction.plot(
+  x.factor = passeriformes$Trophic.Level,
+  xlab = "Trophic Level",
+  trace.factor = passeriformes$Primary.Lifestyle,
+  trace.label = "Primary Lifestyle",
+  response = passeriformes$relBL,
+  ylab = "Relative Beak Length"
+)
+```
+
+
+
+
+
+
+
+
+
+
